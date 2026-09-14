@@ -1,10 +1,6 @@
 streamlit
+plotly
+lightgbm
+scikit-learn
 pandas
 numpy
-scikit-learn
-lightgbm
-joblib
-requests
-openpyxl
-pyarrow
-PyGithub
