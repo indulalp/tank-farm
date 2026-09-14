@@ -16,7 +16,7 @@ TANK_RADIUS = TANK_DIAMETER / 2.0
 TANK_AREA = np.pi * (TANK_RADIUS ** 2)  # ~49.017 m2
 TANK_VOLUME = TANK_AREA * TANK_HEIGHT   # ~667.12 m3
 
-# 17 Crudes from Provided Refinery Schedule with Standard Assay Properties
+# 17 Crude Assays Catalog
 CRUDE_CATALOG = {
     "WTI":                 {"API": 39.8, "Sulfur": 0.24, "TAN": 0.10},
     "Espo":                {"API": 34.8, "Sulfur": 0.62, "TAN": 0.12},
@@ -85,7 +85,6 @@ if "tanks_data" not in st.session_state:
     st.session_state.tanks_data = {}
     for i in range(6):
         name = f"Tank {i+1}"
-        # Default sample parcels in initial tanks
         default_layers = [
             {"crude": "Ural", "tons": 60.0},
             {"crude": "Arab_Lt", "tons": 50.0},
@@ -111,7 +110,7 @@ with st.sidebar:
 
 if page == "1. Tank Farm & Blending Simulator":
     st.title("🛢️ Crude Tank Farm: Multi-Layer Stratification & CDU Blending")
-    st.caption(f"Geometry: D = {TANK_DIAMETER} m (R = {TANK_RADIUS:.2f} m) | H = {TANK_HEIGHT} m | Total Volume = {TANK_VOLUME:.1f} m³")
+    st.caption(f"Geometry: D = {TANK_DIAMETER} m (R = {TANK_RADIUS:.2f} m) | H = {TANK_HEIGHT} m | Max Volume = {TANK_VOLUME:.1f} m³")
 
     with st.sidebar:
         st.header("⚙️ Tank Farm Setup")
@@ -130,10 +129,10 @@ if page == "1. Tank Farm & Blending Simulator":
 
         sim_hours = st.slider("Simulation Horizon (Hours)", 6, 72, 24)
         settling_tau = st.slider("Stratification Relaxation Time (τ hrs)", 6.0, 48.0, 18.0,
-                                 help="Time taken for layers to segregate by density after tank circulation stops.")
+                                 help="Time taken for layers to segregate by gravity after circulation stops.")
 
         st.divider()
-        st.header("🔀 Flow Adjustments")
+        st.header("🔀 Scheduled Flow Adjustments")
         active_tank_names = [f"Tank {i+1}" for i in range(st.session_state.num_tanks)]
         with st.expander("Add Flow Change Event"):
             ev_tank = st.selectbox("Select Tank", active_tank_names)
@@ -150,7 +149,6 @@ if page == "1. Tank Farm & Blending Simulator":
                 st.session_state.flow_events = []
                 st.rerun()
 
-    # Active Tanks
     active_tanks = {f"Tank {i+1}": st.session_state.tanks_data[f"Tank {i+1}"] for i in range(st.session_state.num_tanks)}
 
     st.subheader("Tank Farm Inventory & Discharge Pump Settings")
@@ -158,50 +156,130 @@ if page == "1. Tank Farm & Blending Simulator":
 
     for idx, (t_name, t_info) in enumerate(active_tanks.items()):
         with tank_tabs[idx]:
-            c1, c2 = st.columns([2, 3])
-            with c1:
-                t_info["pump_active"] = st.checkbox("Booster Pump Running", value=t_info["pump_active"], key=f"pa_{t_name}")
-                t_info["initial_flow"] = st.number_input("Outlet Flow Rate (m³/h)", 0.0, 120.0, float(t_info["initial_flow"]), key=f"fl_{t_name}")
+            c_left, c_right = st.columns([1, 1])
 
-                st.markdown("**Add Crude Parcel**")
-                crude_choice = st.selectbox("Crude Type", list(CRUDE_CATALOG.keys()), key=f"cs_{t_name}")
-                tons_choice = st.number_input("Mass (metric tons)", 1.0, 600.0, 30.0, step=5.0, key=f"tc_{t_name}")
+            # PUMP CONTROLS
+            with c_left:
+                st.markdown("#### ⚙️ Booster Pump Control")
+                col_p1, col_p2 = st.columns(2)
+                with col_p1:
+                    t_info["pump_active"] = st.checkbox("Booster Pump Running", value=t_info["pump_active"], key=f"pa_{t_name}")
+                with col_p2:
+                    t_info["initial_flow"] = st.number_input("Flow Rate (m³/h)", 0.0, 120.0, float(t_info["initial_flow"]), key=f"fl_{t_name}")
 
-                btn_add, btn_clear = st.columns(2)
-                with btn_add:
+                st.divider()
+
+                # INPUT MODE SELECTOR
+                input_mode = st.radio(
+                    "Input Method for Inventory:",
+                    ["Option A: Add by Mass (Tons)", "Option B: Set Height & % Breakdown"],
+                    key=f"mode_{t_name}"
+                )
+
+                if input_mode == "Option A: Add by Mass (Tons)":
+                    st.markdown("**Add Crude Parcel Layer**")
+                    col_m1, col_m2 = st.columns([2, 1])
+                    with col_m1:
+                        crude_choice = st.selectbox("Crude Type", list(CRUDE_CATALOG.keys()), key=f"cs_{t_name}")
+                    with col_m2:
+                        tons_choice = st.number_input("Mass (t)", 1.0, 600.0, 30.0, step=5.0, key=f"tc_{t_name}")
+
                     if st.button("➕ Add Layer", key=f"btn_add_{t_name}"):
                         t_info["layers"].append({"crude": crude_choice, "tons": float(tons_choice)})
                         st.rerun()
-                with btn_clear:
-                    if st.button("🗑️ Clear Tank", key=f"btn_clr_{t_name}"):
-                        t_info["layers"] = []
-                        st.rerun()
 
-            with c2:
+                else:
+                    st.markdown("**Set Level & Parcel Volumetric %**")
+                    target_height = st.number_input("Total Liquid Height (m)", 0.1, float(TANK_HEIGHT), 10.0, step=0.5, key=f"th_{t_name}")
+                    target_vol = target_height * TANK_AREA
+
+                    selected_crudes = st.multiselect(
+                        "Select Crude Types Present in Tank",
+                        list(CRUDE_CATALOG.keys()),
+                        default=["Ural", "Arab_Lt", "Basrah_M"],
+                        key=f"ms_{t_name}"
+                    )
+
+                    pct_inputs = {}
+                    if selected_crudes:
+                        default_pct = round(100.0 / len(selected_crudes), 1)
+                        pct_cols = st.columns(min(len(selected_crudes), 3))
+                        for i, c_name in enumerate(selected_crudes):
+                            with pct_cols[i % 3]:
+                                pct_inputs[c_name] = st.number_input(f"{c_name} %", 0.0, 100.0, default_pct, step=1.0, key=f"pct_{t_name}_{c_name}")
+
+                    if st.button("⚡ Apply Height & Percentages", key=f"btn_apply_{t_name}"):
+                        tot_pct = sum(pct_inputs.values())
+                        if tot_pct <= 0:
+                            st.error("Total percentage must be greater than 0%.")
+                        else:
+                            new_layers = []
+                            for c_name, pct_val in pct_inputs.items():
+                                norm_pct = pct_val / tot_pct
+                                crude_vol = target_vol * norm_pct
+                                dens = api_to_density(CRUDE_CATALOG[c_name]["API"])
+                                crude_mass = (crude_vol * dens) / 1000.0
+                                new_layers.append({"crude": c_name, "tons": round(crude_mass, 2)})
+                            t_info["layers"] = new_layers
+                            st.rerun()
+
+            # INVENTORY TABLE, OVERFLOW CHECKS & REMOVE CONTROLS
+            with c_right:
+                st.markdown("#### 📋 Current Tank Inventory & Capacity Check")
+                
+                # Calculate current totals
+                total_v = 0.0
+                total_m = 0.0
+                for lyr in t_info["layers"]:
+                    d = api_to_density(CRUDE_CATALOG[lyr["crude"]]["API"])
+                    total_v += (lyr["tons"] * 1000.0) / d
+                    total_m += lyr["tons"]
+
+                cur_level = total_v / TANK_AREA
+                fill_pct = (total_v / TANK_VOLUME) * 100.0
+
+                # OVERFLOW / CAPACITY WARNINGS
+                if cur_level > TANK_HEIGHT:
+                    overflow_vol = total_v - TANK_VOLUME
+                    overflow_height = cur_level - TANK_HEIGHT
+                    st.error(
+                        f"🚨 **CRITICAL OVERFILL WARNING!** Tank capacity exceeded by **{overflow_vol:.1f} m³** "
+                        f"(Overflow height: **+{overflow_height:.2f} m** above the {TANK_HEIGHT} m max shell height). "
+                        f"Please remove parcels or lower inputs."
+                    )
+                elif fill_pct > 90.0:
+                    st.warning(f"⚠️ **High Level Warning:** Tank is at **{fill_pct:.1f}%** capacity ({cur_level:.2f} m / {TANK_HEIGHT} m).")
+                else:
+                    st.success(f"✅ Level Normal: **{cur_level:.2f} m** / {TANK_HEIGHT} m ({fill_pct:.1f}% capacity)")
+
+                # Parcel breakdown with individual delete buttons
                 if t_info["layers"]:
-                    inv_rows = []
-                    total_v = 0.0
-                    total_m = 0.0
+                    st.markdown("**Parcel Breakdown (Delete or Adjust):**")
                     for lyr_idx, lyr in enumerate(t_info["layers"]):
                         d = api_to_density(CRUDE_CATALOG[lyr["crude"]]["API"])
                         v = (lyr["tons"] * 1000.0) / d
-                        total_v += v
-                        total_m += lyr["tons"]
-                        inv_rows.append({
-                            "#": lyr_idx + 1,
-                            "Crude Name": lyr["crude"],
-                            "Tons": lyr["tons"],
-                            "Vol (m³)": round(v, 2),
-                            "API (°)": CRUDE_CATALOG[lyr["crude"]]["API"],
-                            "Sulfur (wt%)": CRUDE_CATALOG[lyr["crude"]]["Sulfur"]
-                        })
-                    st.dataframe(pd.DataFrame(inv_rows), height=220, use_container_width=True)
-                    cur_level = total_v / TANK_AREA
-                    st.info(f"Inventory: **{total_v:.1f} m³** | Level: **{cur_level:.2f} m** / {TANK_HEIGHT} m | Total Mass: **{total_m:.1f} tons**")
-                else:
-                    st.warning("No parcels added yet. Add a layer using the left panel.")
+                        
+                        row_c1, row_c2, row_c3, row_c4 = st.columns([3, 2, 2, 1])
+                        with row_c1:
+                            st.write(f"**{lyr_idx+1}. {lyr['crude']}**")
+                        with row_c2:
+                            st.write(f"{lyr['tons']:.1f} t")
+                        with row_c3:
+                            st.write(f"{v:.1f} m³")
+                        with row_c4:
+                            if st.button("❌", key=f"del_{t_name}_{lyr_idx}", help="Remove this parcel"):
+                                t_info["layers"].pop(lyr_idx)
+                                st.rerun()
 
-    # Non-destructive Simulation Engine
+                    if st.button("🗑️ Clear Entire Tank", key=f"btn_clr_{t_name}"):
+                        t_info["layers"] = []
+                        st.rerun()
+
+                    st.info(f"Summary: Total Volume: **{total_v:.1f} m³** | Total Mass: **{total_m:.1f} t**")
+                else:
+                    st.info("Tank is currently empty.")
+
+    # Dynamic Depletion Simulation
     sim_tanks_state = copy.deepcopy(active_tanks)
     sim_records = []
     manifold_records = []
@@ -228,9 +306,8 @@ if page == "1. Tank Farm & Blending Simulator":
                 rate = 0.0
                 tank_vol = 0.0
 
-            lvl = min(TANK_HEIGHT, tank_vol / TANK_AREA)
+            lvl = tank_vol / TANK_AREA
 
-            # Homogeneous at t=0, layer de-mixing kinetics as t increases
             if tank_vol > 0:
                 mean_rho = sum(cur_vols[c] * api_to_density(CRUDE_CATALOG[c]["API"]) for c in cur_vols) / tank_vol
                 demix_factor = (1.0 - np.exp(-t_idx / settling_tau))
@@ -244,7 +321,7 @@ if page == "1. Tank Farm & Blending Simulator":
             else:
                 fractions = {c: 0.0 for c in CRUDE_CATALOG}
 
-            # Deplete inventory copy for current hour
+            # Deplete
             vol_draw = rate * 1.0
             if vol_draw > 0 and tank_vol > 0:
                 for lyr in t_info["layers"]:
@@ -293,7 +370,7 @@ if page == "1. Tank Farm & Blending Simulator":
     sim_df = pd.DataFrame(sim_records)
     manifold_df = pd.DataFrame(manifold_records)
 
-    # Charts
+    # Dynamic Graphs
     st.divider()
     st.subheader("Dynamic Feed and Level Curves")
     gc1, gc2 = st.columns(2)
@@ -303,7 +380,10 @@ if page == "1. Tank Farm & Blending Simulator":
         for t_name in active_tanks.keys():
             sub = sim_df[sim_df["Tank"] == t_name]
             fig_lvl.add_trace(go.Scatter(x=sub["Timestamp"], y=sub["Level_m"], mode="lines", name=f"{t_name} Level"))
-        fig_lvl.update_layout(title="Tank Level Depletion vs. Time", xaxis_title="Date & Time", yaxis_title="Level (m)", yaxis_range=[0, TANK_HEIGHT + 1], hovermode="x unified")
+        
+        # Add red line for tank max safe height
+        fig_lvl.add_hline(y=TANK_HEIGHT, line_dash="dash", line_color="red", annotation_text=f"Max Shell Height ({TANK_HEIGHT}m)")
+        fig_lvl.update_layout(title="Tank Level Depletion vs. Time", xaxis_title="Date & Time", yaxis_title="Level (m)", hovermode="x unified")
         st.plotly_chart(fig_lvl, use_container_width=True)
 
     with gc2:
@@ -313,9 +393,9 @@ if page == "1. Tank Farm & Blending Simulator":
         fig_p.update_layout(title="Blended Feed Properties Drift (CDU Header)", xaxis_title="Date & Time", yaxis=dict(title="Blended API (°)"), yaxis2=dict(title="Sulfur (wt%)", overlaying="y", side="right"), hovermode="x unified")
         st.plotly_chart(fig_p, use_container_width=True)
 
-    # Hourly Fraction Table
+    # Dynamic Hourly Fraction Table
     st.divider()
-    st.subheader("Hourly Parcel Fraction Table (Total = 1.0)")
+    st.subheader("Hourly Parcel Fraction Breakdown Table (Total = 1.0)")
     hr_sel = st.slider("Select Simulation Hour to Inspect", 0, sim_hours, 0)
     inspect_data = sim_df[sim_df["Hour"] == hr_sel].copy()
 
@@ -325,11 +405,13 @@ if page == "1. Tank Farm & Blending Simulator":
     
     if renames:
         show_df["Total Fraction"] = show_df[list(renames.values())].sum(axis=1).round(4)
+        show_df["Level_m"] = show_df["Level_m"].round(2)
+        show_df["Volume_m3"] = show_df["Volume_m3"].round(1)
         st.dataframe(show_df.style.format({c: "{:.4f}" for c in list(renames.values()) + ["Total Fraction"]}), use_container_width=True)
     else:
         st.dataframe(show_df, use_container_width=True)
 
-    # LightGBM CDU Yields Prediction
+    # Real-Time LightGBM CDU Prediction
     cdu_model = get_or_train_cdu_model()
     curr_m = manifold_df[manifold_df["Hour"] == hr_sel].iloc[0]
     if curr_m["Flow_m3h"] > 0 and not np.isnan(curr_m["API"]):
